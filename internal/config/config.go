@@ -92,10 +92,10 @@ func DefaultConfig() *Config {
 		Security: SecurityConfig{
 			SecretPatterns: []string{
 				`(?i)api[_-]?key[\s]*[:=][\s]*['"]?[a-zA-Z0-9]{20,}['"]?`,
-				`(?i)password[\s]*[:=][\s]*['"]?[^\s'"]{8,}['"]?`,
+				`(?i)(user_?password|db_?password|admin_?password|postgres_password|mysql_password)[\s]*[:=][\s]*['"]?[^\s'"]{8,}['"]?`,
 				`(?i)secret[\s]*[:=][\s]*['"]?[a-zA-Z0-9]{16,}['"]?`,
 				`(?i)token[\s]*[:=][\s]*['"]?[a-zA-Z0-9]{20,}['"]?`,
-				`(?i)private[_-]?key`,
+				`(?i)private[_-]?key[\s]*[:=][\s]*['"]?[a-zA-Z0-9/+=]{20,}['"]?`,
 				`(?i)access[_-]?token[\s]*[:=][\s]*['"]?[a-zA-Z0-9]{20,}['"]?`,
 				`(?i)auth[_-]?token[\s]*[:=][\s]*['"]?[a-zA-Z0-9]{20,}['"]?`,
 				`(?i)database[_-]?url[\s]*[:=][\s]*['"]?[^\s'"]+['"]?`,
@@ -116,9 +116,6 @@ func DefaultConfig() *Config {
 			BinaryExtensions: []string{
 				".exe", ".dll", ".so", ".dylib", ".a", ".lib",
 				".zip", ".tar", ".gz", ".bz2", ".xz", ".7z",
-				".jpg", ".jpeg", ".png", ".gif", ".bmp", ".ico",
-				".mp3", ".mp4", ".avi", ".mov", ".wmv", ".flv",
-				".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
 			},
 		},
 		Quality: QualityConfig{

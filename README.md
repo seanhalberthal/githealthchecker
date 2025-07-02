@@ -1,6 +1,6 @@
 # Git Repository Health Checker
 
-A CLI tool for analyzing Git repositories to identify security vulnerabilities, code quality issues, and maintenance problems. Works with any repository, with advanced complexity analysis and dependency management for Go projects.
+A CLI tool for analyzing Go repositories to identify security vulnerabilities, code quality issues, and maintenance problems, with advanced complexity analysis and dependency management.
 
 ## Installation
 
@@ -49,7 +49,7 @@ git-health-checker check --format json
 git-health-checker check --format markdown --output report.md
 ```
 
-### Auto-Fix Dependencies (Go projects only)
+### Auto-Fix Dependencies
 
 ```bash
 # Preview what would be fixed
@@ -61,11 +61,11 @@ git-health-checker fix
 
 ## What it checks
 
-- **Security**: Secrets in code, suspicious files (supports Go, JS, Python, Java, Ruby, PHP, C/C++, shell scripts, config files)
-- **Quality**: Function complexity (Go-specific), large files (all languages)
+- **Security**: Secrets in your codebase, suspicious files, configuration files
+- **Quality**: Cognitive complexity, large files
 - **Performance**: Binary files, repository size
-- **Dependencies**: Outdated packages, blocked dependencies (Go, Node.js)
-- **Maintenance**: Missing required files, documentation
+- **Dependencies**: Outdated modules, unused dependencies, blocked packages (go.mod)
+- **Maintenance**: Missing required files (go.mod, .gitignore, README)
 - **Workflow**: Commit conventions, stale branches
 
 ## Configuration

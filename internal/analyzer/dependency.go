@@ -15,7 +15,6 @@ import (
 )
 
 const goMod = "go.mod"
-const packageJson = "package.json"
 const failedToCloseGoModError = "failed to close " + goMod + " file: %v\n"
 
 type DependencyAnalyzer struct {
@@ -69,25 +68,11 @@ func (a *DependencyAnalyzer) Analyze() ([]report.Issue, error) {
 		issues = append(issues, unusedIssues...)
 	}
 
-	// Check for Node.js dependencies
-	if a.hasPackageJson() {
-		nodeIssues, err := a.analyzeNodeModules()
-		if err != nil {
-			return nil, fmt.Errorf("failed to analyze Node modules: %w", err)
-		}
-		issues = append(issues, nodeIssues...)
-	}
-
 	return issues, nil
 }
 
 func (a *DependencyAnalyzer) hasGoMod() bool {
 	_, err := os.Stat(filepath.Join(a.repoPath, goMod))
-	return err == nil
-}
-
-func (a *DependencyAnalyzer) hasPackageJson() bool {
-	_, err := os.Stat(filepath.Join(a.repoPath, packageJson))
 	return err == nil
 }
 
@@ -188,50 +173,6 @@ func (a *DependencyAnalyzer) checkOutdatedGoPackage(pkg PackageInfo) *report.Iss
 		Fix:         fmt.Sprintf("Update to latest version: go get %s@%s", pkg.Name, pkg.LatestVersion),
 		CreatedAt:   time.Now(),
 	}
-}
-
-func (a *DependencyAnalyzer) analyzeNodeModules() ([]report.Issue, error) {
-	var issues []report.Issue
-
-	// Simple check for known vulnerable packages in package.json
-	packageJsonPath := filepath.Join(a.repoPath, packageJson)
-	file, err := os.Open(packageJsonPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open package.json: %w", err)
-	}
-	defer func(file *os.File) {
-		err := file.Close()
-		if err != nil {
-			fmt.Printf("failed to close package.json file: %v\n", err)
-		}
-	}(file)
-
-	var packageData map[string]interface{}
-	if err := json.NewDecoder(file).Decode(&packageData); err != nil {
-		return nil, fmt.Errorf("failed to parse package.json: %w", err)
-	}
-
-	// Check dependencies
-	if deps, ok := packageData["dependencies"].(map[string]interface{}); ok {
-		for pkg := range deps {
-			if a.isBlockedPackage(pkg) {
-				issue := report.Issue{
-					ID:          fmt.Sprintf("blocked-node-dependency-%s", strings.ReplaceAll(pkg, "/", "-")),
-					Title:       "Blocked Node.js dependency",
-					Description: fmt.Sprintf("Package %s is in the blocked list and should not be used", pkg),
-					Category:    report.CategorySecurity,
-					Severity:    report.SeverityHigh,
-					File:        packageJson,
-					Rule:        "blocked-dependencies",
-					Fix:         fmt.Sprintf("Remove %s from dependencies and find an alternative", pkg),
-					CreatedAt:   time.Now(),
-				}
-				issues = append(issues, issue)
-			}
-		}
-	}
-
-	return issues, nil
 }
 
 func (a *DependencyAnalyzer) parseGoModules(output []byte) ([]PackageInfo, error) {

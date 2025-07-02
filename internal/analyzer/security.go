@@ -45,7 +45,7 @@ func (a *SecurityAnalyzer) scanForSecrets() ([]report.Issue, error) {
 	var issues []report.Issue
 
 	for _, pattern := range a.config.SecretPatterns {
-		matches, err := a.scanner.SearchInFiles(pattern, []string{".go", ".js", ".py", ".java", ".rb", ".php", ".cs", ".cpp", ".c", ".sh", ".yaml", ".yml", ".json", ".xml", ".properties", ".env"})
+		matches, err := a.scanner.SearchInFiles(pattern, []string{".go", ".mod", ".sum", ".yaml", ".yml", ".json", ".env"})
 		if err != nil {
 			return nil, fmt.Errorf("failed to search for pattern %s: %w", pattern, err)
 		}
@@ -204,8 +204,7 @@ func (a *SecurityAnalyzer) hasTestFilePattern(filePath string) bool {
 	fileName := strings.ToLower(filepath.Base(filePath))
 
 	testPatterns := []string{
-		"_test.go", "_test.js", "_test.py", "_test.java",
-		".test.js", ".spec.js", ".spec.ts", "test_",
+		"_test.go", "test_",
 	}
 
 	for _, pattern := range testPatterns {
