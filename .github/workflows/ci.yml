@@ -400,9 +400,27 @@ jobs:
         files: |
           release-assets/*
         
+    - name: Trigger Homebrew workflow
+      if: steps.version.outputs.should_release == 'true'
+      uses: actions/github-script@v7
+      with:
+        github-token: ${{ secrets.GITHUB_TOKEN }}
+        script: |
+          await github.rest.actions.createWorkflowDispatch({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            workflow_id: 'homebrew.yml',
+            ref: 'main',
+            inputs: {
+              version: '${{ steps.version.outputs.version }}'
+            }
+          });
+          console.log('Triggered Homebrew workflow for version ${{ steps.version.outputs.version }}');
+        
     - name: Release summary
       if: steps.version.outputs.should_release == 'true'
       run: |
         echo "🎉 Created release v${{ steps.version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
         echo "📈 Version bump: ${{ steps.version.outputs.bump_type }}" >> $GITHUB_STEP_SUMMARY
         echo "🏷️ Previous version: v${{ steps.version.outputs.previous_version }}" >> $GITHUB_STEP_SUMMARY
+        echo "🍺 Triggered Homebrew formula update" >> $GITHUB_STEP_SUMMARY
