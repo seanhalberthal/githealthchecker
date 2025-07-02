@@ -40,6 +40,9 @@ go build -o git-health-checker .
 # Basic health check
 git-health-checker check
 
+# Can also be used with a directory path
+git-health-checker check /path/to/repo
+
 # Specific analysis types
 git-health-checker check --security
 git-health-checker check --quality
