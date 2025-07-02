@@ -83,48 +83,8 @@ require (
 	}
 }
 
-func TestDependencyAnalyzer_HasPackageJson(t *testing.T) {
-	tempDir, err := os.MkdirTemp("", "packagejson_test")
-	if err != nil {
-		t.Fatalf("Failed to create temp directory: %v", err)
-	}
-	defer func(path string) {
-		err := os.RemoveAll(path)
-		if err != nil {
-			t.Fatalf("Failed to clean up temp directory %s: %v", path, err)
-		}
-	}(tempDir)
-
-	cfg := &config.DependencyConfig{}
-	analyzer := NewDependencyAnalyzer(cfg, tempDir)
-
-	// Test without package.json
-	if analyzer.hasPackageJson() {
-		t.Error("hasPackageJson() should return false when package.json doesn't exist")
-	}
-
-	// Create package.json file
-	packageJsonContent := `{
-  "name": "test-project",
-  "version": "1.0.0",
-  "dependencies": {
-    "lodash": "^4.17.21",
-    "express": "^4.18.2"
-  }
-}`
-	packageJsonPath := filepath.Join(tempDir, "package.json")
-	if err := os.WriteFile(packageJsonPath, []byte(packageJsonContent), 0644); err != nil {
-		t.Fatalf("Failed to create package.json: %v", err)
-	}
-
-	// Test with package.json
-	if !analyzer.hasPackageJson() {
-		t.Error("hasPackageJson() should return true when package.json exists")
-	}
-}
-
-func TestDependencyAnalyzer_AnalyzeNodeModules(t *testing.T) {
-	tempDir, err := os.MkdirTemp("", "node_deps_test")
+func TestDependencyAnalyzer_BlockedGoPackages(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "blocked_go_test")
 	if err != nil {
 		t.Fatalf("Failed to create temp directory: %v", err)
 	}
@@ -136,44 +96,35 @@ func TestDependencyAnalyzer_AnalyzeNodeModules(t *testing.T) {
 	}(tempDir)
 
 	cfg := &config.DependencyConfig{
-		BlockedPackages: []string{"lodash", "moment"},
+		BlockedPackages: []string{"github.com/bad/package", "dangerous.com/pkg"},
+		CheckOutdated:   true,
 	}
 	analyzer := NewDependencyAnalyzer(cfg, tempDir)
 
-	// Create package.json with blocked dependency
-	packageJsonContent := `{
-  "name": "test-project",
-  "version": "1.0.0",
-  "dependencies": {
-    "lodash": "^4.17.21",
-    "express": "^4.18.2"
-  }
-}`
-	packageJsonPath := filepath.Join(tempDir, "package.json")
-	if err := os.WriteFile(packageJsonPath, []byte(packageJsonContent), 0644); err != nil {
-		t.Fatalf("Failed to create package.json: %v", err)
+	// Create go.mod file with blocked dependency
+	goModContent := `module test/project
+
+go 1.21
+
+require (
+	github.com/bad/package v1.0.0
+	github.com/good/package v2.0.0
+)
+`
+	goModPath := filepath.Join(tempDir, "go.mod")
+	if err := os.WriteFile(goModPath, []byte(goModContent), 0644); err != nil {
+		t.Fatalf("Failed to create go.mod: %v", err)
 	}
 
-	issues, err := analyzer.analyzeNodeModules()
-	if err != nil {
-		t.Fatalf("analyzeNodeModules() failed: %v", err)
+	// Since we can't easily mock go list output, we'll test the blocked package detection logic
+	isBlocked := analyzer.isBlockedPackage("github.com/bad/package")
+	if !isBlocked {
+		t.Error("Expected github.com/bad/package to be blocked")
 	}
 
-	if len(issues) != 1 {
-		t.Errorf("Expected 1 issue for blocked dependency, got %d", len(issues))
-	}
-
-	if len(issues) > 0 {
-		issue := issues[0]
-		if issue.Title != "Blocked Node.js dependency" {
-			t.Errorf("Expected title 'Blocked Node.js dependency', got '%s'", issue.Title)
-		}
-		if issue.Severity != report.SeverityHigh {
-			t.Errorf("Expected high severity, got %s", issue.Severity)
-		}
-		if issue.File != "package.json" {
-			t.Errorf("Expected file 'package.json', got '%s'", issue.File)
-		}
+	isNotBlocked := analyzer.isBlockedPackage("github.com/good/package")
+	if isNotBlocked {
+		t.Error("Expected github.com/good/package to not be blocked")
 	}
 }
 
