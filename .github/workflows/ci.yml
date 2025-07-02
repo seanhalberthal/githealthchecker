@@ -174,7 +174,7 @@ jobs:
         go mod download
         # Build with version information  
         VERSION_TAG="dev-$(git rev-parse --short HEAD)"
-        go build -v -ldflags "-X github.com/seanhalberthal/githealthchecker/cmd.Version=$VERSION_TAG" -o githealthchecker${{ matrix.os == 'windows-latest' && '.exe' || '' }} .
+        go build -v -ldflags "-X github.com/githealthchecker/git-health-checker/cmd.Version=$VERSION_TAG" -o githealthchecker${{ matrix.os == 'windows-latest' && '.exe' || '' }} .
       shell: bash
         
     - name: Test binary
@@ -196,7 +196,7 @@ jobs:
     name: Release Readiness
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main'
-    needs: [test-and-lint, build-cross-platform]
+    needs: [test-and-lint]
     
     steps:
     - name: Checkout code
@@ -341,47 +341,41 @@ jobs:
         echo "$RELEASE_NOTES" > release_notes.md
         echo "Generated release notes for v$NEW_VERSION"
         
-    - name: Download build artifacts
+    - name: Set up Go for release builds
       if: steps.version.outputs.should_release == 'true'
-      uses: actions/download-artifact@v4
+      uses: actions/setup-go@v4
       with:
-        pattern: githealthchecker-*
-        path: ./artifacts
+        go-version: ${{ env.GO_VERSION }}
         
-    - name: Prepare release assets
+    - name: Build release binaries
       if: steps.version.outputs.should_release == 'true'
       run: |
         # Create release assets directory
         mkdir -p release-assets
         
-        echo "Downloaded artifacts structure:"
-        find ./artifacts -type f -name "*githealthchecker*" | head -20
+        VERSION="v${{ steps.version.outputs.version }}"
+        echo "Building release binaries with version: $VERSION"
         
-        # Process Linux binary
-        if [ -f "./artifacts/githealthchecker-ubuntu-latest/githealthchecker" ]; then
-          cp "./artifacts/githealthchecker-ubuntu-latest/githealthchecker" ./githealthchecker
-          tar -czf release-assets/githealthchecker-v${{ steps.version.outputs.version }}-linux-amd64.tar.gz githealthchecker
-          cp githealthchecker release-assets/githealthchecker-linux-amd64
-          echo "✅ Processed Linux binary"
-        fi
+        # Build Linux binary
+        echo "Building Linux binary..."
+        GOOS=linux GOARCH=amd64 go build -v -ldflags "-X github.com/githealthchecker/git-health-checker/cmd.Version=$VERSION" -o githealthchecker .
+        tar -czf release-assets/githealthchecker-v${{ steps.version.outputs.version }}-linux-amd64.tar.gz githealthchecker
+        cp githealthchecker release-assets/githealthchecker-linux-amd64
+        echo "✅ Built Linux binary"
         
-        # Process Windows binary
-        if [ -f "./artifacts/githealthchecker-windows-latest/githealthchecker.exe" ]; then
-          cp "./artifacts/githealthchecker-windows-latest/githealthchecker.exe" ./githealthchecker.exe
-          zip -j release-assets/githealthchecker-v${{ steps.version.outputs.version }}-windows-amd64.zip githealthchecker.exe
-          cp githealthchecker.exe release-assets/githealthchecker-windows-amd64.exe
-          echo "✅ Processed Windows binary"
-        fi
+        # Build Windows binary
+        echo "Building Windows binary..."
+        GOOS=windows GOARCH=amd64 go build -v -ldflags "-X github.com/githealthchecker/git-health-checker/cmd.Version=$VERSION" -o githealthchecker.exe .
+        zip -j release-assets/githealthchecker-v${{ steps.version.outputs.version }}-windows-amd64.zip githealthchecker.exe
+        cp githealthchecker.exe release-assets/githealthchecker-windows-amd64.exe
+        echo "✅ Built Windows binary"
         
-        # Process macOS binary
-        if [ -f "./artifacts/githealthchecker-macos-latest/githealthchecker" ]; then
-          cp "./artifacts/githealthchecker-macos-latest/githealthchecker" ./githealthchecker
-          tar -czf release-assets/githealthchecker-v${{ steps.version.outputs.version }}-darwin-amd64.tar.gz githealthchecker
-          cp githealthchecker release-assets/githealthchecker-darwin-amd64
-          echo "✅ Processed macOS binary"
-        else
-          echo "❌ macOS binary not found"
-        fi
+        # Build macOS binary
+        echo "Building macOS binary..."
+        GOOS=darwin GOARCH=amd64 go build -v -ldflags "-X github.com/githealthchecker/git-health-checker/cmd.Version=$VERSION" -o githealthchecker .
+        tar -czf release-assets/githealthchecker-v${{ steps.version.outputs.version }}-darwin-amd64.tar.gz githealthchecker
+        cp githealthchecker release-assets/githealthchecker-darwin-amd64
+        echo "✅ Built macOS binary"
         
         # List all release assets
         echo "Release assets prepared:"
