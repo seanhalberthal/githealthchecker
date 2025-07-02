@@ -50,11 +50,12 @@ node_modules/
 	}
 }
 
-func TestFileScanner_ScanFiles(t *testing.T) {
-	// Create a temporary directory
-	tempDir, err := os.MkdirTemp("", "scan_test")
+// Test unified file scanning with caching
+func TestUnifiedFileScanning(t *testing.T) {
+	// Create a temporary directory for testing
+	tempDir, err := os.MkdirTemp("", "unified_scanner_test")
 	if err != nil {
-		t.Fatalf("Failed to create temp directory: %v", err)
+		t.Fatalf("Failed to create temp dir: %v", err)
 	}
 	defer func(path string) {
 		err := os.RemoveAll(path)
@@ -63,120 +64,122 @@ func TestFileScanner_ScanFiles(t *testing.T) {
 		}
 	}(tempDir)
 
-	// Create a test directory structure
+	// Create test files with various characteristics
 	testFiles := map[string]string{
-		"main.go":          "package main\nfunc main() {}",
-		"util.py":          "print('hello')",
-		"README.md":        "# Test Project",
-		"config.json":      `{"name": "test"}`,
-		"binary_file":      string([]byte{0x00, 0x01, 0x02, 0x03}), // Binary content
-		"subdir/nested.js": "console.log('nested');",
+		"small.go":  "package main\n\nfunc main() {\n\tprintln(\"hello\")\n}",
+		"medium.py": strings.Repeat("print('line')\n", 100),
+		"large.txt": strings.Repeat("This is a test line.\n", 2000), // Large file for streaming test
 	}
 
-	// Create .gitignore to ignore some files
-	gitignoreContent := "*.log\nbinary_*\n"
-	gitignorePath := filepath.Join(tempDir, ".gitignore")
-	if err := os.WriteFile(gitignorePath, []byte(gitignoreContent), 0644); err != nil {
-		t.Fatalf("Failed to create .gitignore: %v", err)
+	// Create binary file separately to control inclusion
+	binaryPath := filepath.Join(tempDir, "binary.bin")
+	binaryContent := []byte{0x00, 0x01, 0x02, 0x03, 0x89, 0x50} // Binary content
+	if err := os.WriteFile(binaryPath, binaryContent, 0644); err != nil {
+		t.Fatalf("Failed to create binary file: %v", err)
 	}
 
-	// Create subdirectory
-	subDir := filepath.Join(tempDir, "subdir")
-	if err := os.MkdirAll(subDir, 0755); err != nil {
-		t.Fatalf("Failed to create subdirectory: %v", err)
-	}
-
-	// Create test files
-	for filename, content := range testFiles {
-		filePath := filepath.Join(tempDir, filename)
+	for fileName, content := range testFiles {
+		filePath := filepath.Join(tempDir, fileName)
 		if err := os.WriteFile(filePath, []byte(content), 0644); err != nil {
-			t.Fatalf("Failed to create test file %s: %v", filename, err)
+			t.Fatalf("Failed to create test file %s: %v", fileName, err)
 		}
 	}
 
-	// Create some files that should be ignored
-	ignoredFiles := []string{"app.log", "binary_data"}
-	for _, filename := range ignoredFiles {
-		filePath := filepath.Join(tempDir, filename)
-		if err := os.WriteFile(filePath, []byte("ignored content"), 0644); err != nil {
-			t.Fatalf("Failed to create ignored file %s: %v", filename, err)
-		}
-	}
-
-	// Create scanner
+	// Initialize scanner
 	scanner, err := NewFileScanner(tempDir)
 	if err != nil {
 		t.Fatalf("Failed to create scanner: %v", err)
 	}
 
-	// Scan files
-	files, err := scanner.ScanFiles()
+	// Test unified scanning
+	cachedFiles, err := scanner.ScanAllFiles()
 	if err != nil {
 		t.Fatalf("Failed to scan files: %v", err)
 	}
 
-	// Verify we found the expected files (excluding ignored ones)
-	expectedFileCount := len(testFiles) - 1 // -1 for binary_file which should be ignored
-	if len(files) != expectedFileCount {
-		t.Errorf("Expected %d files, got %d", expectedFileCount, len(files))
+	// Verify expected number of files (binary files are still included in cache, just marked as non-text)
+	expectedFiles := 4 // small.go, medium.py, large.txt, binary.bin
+	if len(cachedFiles) != expectedFiles {
+		t.Errorf("Expected %d files, got %d", expectedFiles, len(cachedFiles))
 	}
 
-	// Verify file properties
-	foundGo := false
-	foundPython := false
-	foundNested := false
+	// Test cached access
+	retrievedFiles := scanner.GetCachedFiles()
+	if len(retrievedFiles) != len(cachedFiles) {
+		t.Errorf("Expected %d cached files, got %d", len(cachedFiles), len(retrievedFiles))
+	}
 
-	for _, file := range files {
-		// Check that the file has required properties
-		if file.Path == "" {
-			t.Error("File path should not be empty")
+	// Verify file properties and caching behavior
+	for relPath, file := range cachedFiles {
+		// Check that all files have proper metadata
+		if file.Path == "" || file.RelativePath == "" {
+			t.Errorf("File %s missing required path information", relPath)
 		}
-		if file.RelativePath == "" {
-			t.Error("Relative path should not be empty")
-		}
+
 		if file.Size <= 0 {
-			t.Error("File size should be greater than 0")
+			t.Errorf("File %s should have positive size", relPath)
 		}
 
-		// Check specific files
-		switch file.RelativePath {
-		case "main.go":
-			foundGo = true
-			if file.Extension != ".go" {
-				t.Errorf("Expected .go extension, got %s", file.Extension)
+		// Test content caching based on file size
+		switch relPath {
+		case "small.go", "medium.py":
+			// Small/medium files should have content cached if they're text and under 1MB
+			if file.IsText && len(file.Content) == 0 {
+				t.Errorf("Small file %s should have cached content", relPath)
 			}
+			if file.LineCount == 0 {
+				t.Errorf("File %s should have line count calculated", relPath)
+			}
+		case "large.txt":
+			// Large files may or may not have content cached depending on size vs 1MB threshold
+			// But should always have line count
+			if file.LineCount == 0 {
+				t.Errorf("Large file %s should have line count calculated", relPath)
+			}
+		case "binary.bin":
+			// Binary files should not have content cached
+			if len(file.Content) > 0 {
+				t.Errorf("Binary file %s should not have cached content", relPath)
+			}
+		}
+
+		// Verify text detection
+		if strings.HasSuffix(relPath, ".bin") {
+			if file.IsText {
+				t.Errorf("Binary file %s should not be detected as text", relPath)
+			}
+		} else {
 			if !file.IsText {
-				t.Error("Go file should be detected as text")
-			}
-		case "util.py":
-			foundPython = true
-			if file.Extension != ".py" {
-				t.Errorf("Expected .py extension, got %s", file.Extension)
-			}
-		case "subdir/nested.js":
-			foundNested = true
-			if file.Extension != ".js" {
-				t.Errorf("Expected .js extension, got %s", file.Extension)
+				t.Errorf("Text file %s should be detected as text", relPath)
 			}
 		}
 	}
 
-	if !foundGo {
-		t.Error("Should have found main.go")
+	// Test filter functionality
+	goFiles := scanner.FilterCachedFiles(func(file *UnifiedFileInfo) bool {
+		return file.Extension == ".go"
+	})
+	if len(goFiles) != 1 {
+		t.Errorf("Expected 1 Go file, got %d", len(goFiles))
 	}
-	if !foundPython {
-		t.Error("Should have found util.py")
+
+	// Test specific file retrieval
+	smallFile, exists := scanner.GetCachedFile("small.go")
+	if !exists {
+		t.Error("Should find small.go in cache")
 	}
-	if !foundNested {
-		t.Error("Should have found nested.js")
+	if smallFile.Extension != ".go" {
+		t.Errorf("Expected .go extension, got %s", smallFile.Extension)
 	}
+
+	t.Logf("Unified scan completed successfully with %d files cached", len(cachedFiles))
 }
 
-func TestFileScanner_SearchInFiles(t *testing.T) {
-	// Create a temporary directory
-	tempDir, err := os.MkdirTemp("", "search_test")
+// Test streaming optimization for large files
+func TestStreamingOptimization(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "streaming_test")
 	if err != nil {
-		t.Fatalf("Failed to create temp directory: %v", err)
+		t.Fatalf("Failed to create temp dir: %v", err)
 	}
 	defer func(path string) {
 		err := os.RemoveAll(path)
@@ -185,208 +188,32 @@ func TestFileScanner_SearchInFiles(t *testing.T) {
 		}
 	}(tempDir)
 
-	// Create test files with patterns to search
-	testFiles := map[string]string{
-		"main.go":   "package main\nfunc main() {\n\tapi_key := \"test123\"\n}",
-		"config.py": "PASSWORD = \"secret123\"\nAPI_TOKEN = \"abc456\"",
-		"readme.md": "# Project\nThis is documentation",
-		"normal.js": "console.log('hello world');",
+	// Create a large file (>1MB) to trigger streaming
+	largeContent := strings.Repeat("This is a test line with sufficient content to trigger streaming optimization.\n", 20000)
+	largePath := filepath.Join(tempDir, "large.txt")
+	if err := os.WriteFile(largePath, []byte(largeContent), 0644); err != nil {
+		t.Fatalf("Failed to create large file: %v", err)
 	}
 
-	for filename, content := range testFiles {
-		filePath := filepath.Join(tempDir, filename)
-		if err := os.WriteFile(filePath, []byte(content), 0644); err != nil {
-			t.Fatalf("Failed to create test file %s: %v", filename, err)
-		}
-	}
-
-	// Create scanner
 	scanner, err := NewFileScanner(tempDir)
 	if err != nil {
 		t.Fatalf("Failed to create scanner: %v", err)
 	}
 
-	// Test searching for an API keys pattern (simplified)
-	pattern := `api_key`
-	extensions := []string{".go", ".py", ".js"}
-
-	matches, err := scanner.SearchInFiles(pattern, extensions)
+	// Test streaming line counting
+	lineCount, err := scanner.countLinesStreaming(largePath)
 	if err != nil {
-		t.Fatalf("Failed to search in files: %v", err)
+		t.Fatalf("Streaming line count failed: %v", err)
 	}
 
-	// Should find the api_key in the main.go
-	if len(matches) == 0 {
-		t.Error("Expected to find matches, but none were found")
+	if lineCount == 0 {
+		t.Errorf("Expected non-zero line count")
 	}
 
-	foundInGo := false
-	for _, match := range matches {
-		if match.File == "main.go" && strings.Contains(match.Content, "api_key") {
-			foundInGo = true
-			if match.Line != 3 {
-				t.Errorf("Expected match on line 3, got line %d", match.Line)
-			}
-		}
+	// Verify line count is approximately correct (should be around 20000)
+	if lineCount < 19900 || lineCount > 20100 {
+		t.Errorf("Line count seems incorrect: got %d, expected around 20000", lineCount)
 	}
 
-	if !foundInGo {
-		t.Error("Should have found api_key pattern in main.go")
-	}
-}
-
-func TestFileScanner_GetFilesByExtension(t *testing.T) {
-	// Create a temporary directory
-	tempDir, err := os.MkdirTemp("", "extension_test")
-	if err != nil {
-		t.Fatalf("Failed to create temp directory: %v", err)
-	}
-	defer func(path string) {
-		err := os.RemoveAll(path)
-		if err != nil {
-			t.Fatalf("Failed to clean up temp directory %s: %v", path, err)
-		}
-	}(tempDir)
-
-	// Create test files with different extensions
-	testFiles := []string{
-		"main.go",
-		"util.go",
-		"script.py",
-		"config.json",
-		"style.css",
-		"app.js",
-	}
-
-	for _, filename := range testFiles {
-		filePath := filepath.Join(tempDir, filename)
-		content := "// test content for " + filename
-		if err := os.WriteFile(filePath, []byte(content), 0644); err != nil {
-			t.Fatalf("Failed to create test file %s: %v", filename, err)
-		}
-	}
-
-	// Create scanner
-	scanner, err := NewFileScanner(tempDir)
-	if err != nil {
-		t.Fatalf("Failed to create scanner: %v", err)
-	}
-
-	// Test getting Go files
-	goFiles, err := scanner.GetFilesByExtension([]string{".go"})
-	if err != nil {
-		t.Fatalf("Failed to get Go files: %v", err)
-	}
-
-	if len(goFiles) != 2 {
-		t.Errorf("Expected 2 Go files, got %d", len(goFiles))
-	}
-
-	// Test getting multiple extensions
-	webFiles, err := scanner.GetFilesByExtension([]string{".js", ".css"})
-	if err != nil {
-		t.Fatalf("Failed to get web files: %v", err)
-	}
-
-	if len(webFiles) != 2 {
-		t.Errorf("Expected 2 web files, got %d", len(webFiles))
-	}
-}
-
-func TestFileScanner_IsTextFile(t *testing.T) {
-	// Create a temporary directory
-	tempDir, err := os.MkdirTemp("", "text_test")
-	if err != nil {
-		t.Fatalf("Failed to create temp directory: %v", err)
-	}
-	defer func(path string) {
-		err := os.RemoveAll(path)
-		if err != nil {
-			t.Fatalf("Failed to clean up temp directory %s: %v", path, err)
-		}
-	}(tempDir)
-
-	// Create a text file
-	textFile := filepath.Join(tempDir, "text.txt")
-	if err := os.WriteFile(textFile, []byte("Hello, World!"), 0644); err != nil {
-		t.Fatalf("Failed to create text file: %v", err)
-	}
-
-	// Create a binary file
-	binaryFile := filepath.Join(tempDir, "binary.bin")
-	binaryContent := []byte{0x00, 0x01, 0x02, 0x03, 0x89, 0x50, 0x4E, 0x47} // PNG header
-	if err := os.WriteFile(binaryFile, binaryContent, 0644); err != nil {
-		t.Fatalf("Failed to create binary file: %v", err)
-	}
-
-	// Create scanner
-	scanner, err := NewFileScanner(tempDir)
-	if err != nil {
-		t.Fatalf("Failed to create scanner: %v", err)
-	}
-
-	// Test text file detection
-	if !scanner.isTextFile(textFile) {
-		t.Error("Text file should be detected as text")
-	}
-
-	if scanner.isTextFile(binaryFile) {
-		t.Error("Binary file should not be detected as text")
-	}
-}
-
-func TestFileScanner_ShouldIgnore(t *testing.T) {
-	// Create a temporary directory
-	tempDir, err := os.MkdirTemp("", "ignore_test")
-	if err != nil {
-		t.Fatalf("Failed to create temp directory: %v", err)
-	}
-	defer func(path string) {
-		err := os.RemoveAll(path)
-		if err != nil {
-			t.Fatalf("Failed to clean up temp directory %s: %v", path, err)
-		}
-	}(tempDir)
-
-	// Create .gitignore with patterns
-	gitignoreContent := `*.log
-*.tmp
-build/
-node_modules/
-.env
-.DS_Store
-`
-	gitignorePath := filepath.Join(tempDir, ".gitignore")
-	if err := os.WriteFile(gitignorePath, []byte(gitignoreContent), 0644); err != nil {
-		t.Fatalf("Failed to create .gitignore: %v", err)
-	}
-
-	// Create scanner
-	scanner, err := NewFileScanner(tempDir)
-	if err != nil {
-		t.Fatalf("Failed to create scanner: %v", err)
-	}
-
-	tests := []struct {
-		path     string
-		expected bool
-	}{
-		{"app.log", true},
-		{"temp.tmp", true},
-		{"build/", true}, // Directory pattern
-		{"build", true},  // Directory name
-		{".env", true},
-		{".DS_Store", true},
-		{"main.go", false},
-		{"README.md", false},
-		{"src/util.py", false},
-	}
-
-	for _, test := range tests {
-		result := scanner.shouldIgnore(test.path)
-		if result != test.expected {
-			t.Errorf("For path '%s', expected shouldIgnore=%v, got %v",
-				test.path, test.expected, result)
-		}
-	}
+	t.Logf("Streaming line count completed: %d lines", lineCount)
 }

@@ -2,7 +2,10 @@ package analyzer
 
 import (
 	"fmt"
+	"io"
+	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -26,6 +29,13 @@ func NewQualityAnalyzer(cfg *config.QualityConfig, fileScanner *scanner.FileScan
 func (a *QualityAnalyzer) Analyze() ([]report.Issue, error) {
 	var issues []report.Issue
 
+	// Use cached files if available for better performance
+	cachedFiles := a.scanner.GetCachedFiles()
+	if len(cachedFiles) > 0 {
+		return a.analyzeFromCache(cachedFiles)
+	}
+
+	// Fallback to original method
 	fileSizeIssues, err := a.checkLargeFiles()
 	if err != nil {
 		return nil, fmt.Errorf("failed to check large files: %w", err)
@@ -39,6 +49,56 @@ func (a *QualityAnalyzer) Analyze() ([]report.Issue, error) {
 	issues = append(issues, complexityIssues...)
 
 	return issues, nil
+}
+
+// analyzeFromCache performs quality analysis using cached file data
+func (a *QualityAnalyzer) analyzeFromCache(cachedFiles map[string]*scanner.UnifiedFileInfo) ([]report.Issue, error) {
+	var issues []report.Issue
+
+	// Check large files using cached data
+	largeFileIssues := a.checkLargeFilesFromCache(cachedFiles)
+	issues = append(issues, largeFileIssues...)
+
+	// Check complexity using cached data
+	complexityIssues, err := a.checkComplexityFromCache(cachedFiles)
+	if err != nil {
+		return nil, fmt.Errorf("failed to check complexity from cache: %w", err)
+	}
+	issues = append(issues, complexityIssues...)
+
+	return issues, nil
+}
+
+// checkLargeFilesFromCache checks for large files using cached data
+func (a *QualityAnalyzer) checkLargeFilesFromCache(cachedFiles map[string]*scanner.UnifiedFileInfo) []report.Issue {
+	var issues []report.Issue
+	codeExtensions := map[string]bool{
+		".go": true, ".js": true, ".ts": true, ".py": true, ".java": true, ".rb": true, ".php": true, ".cs": true, ".cpp": true, ".c": true, ".rs": true, ".kt": true,
+	}
+
+	for _, file := range cachedFiles {
+		// Skip if not a code file
+		if !codeExtensions[file.Extension] {
+			continue
+		}
+
+		if file.LineCount > a.config.MaxFileLines {
+			issue := report.Issue{
+				ID:          fmt.Sprintf("large-file-lines-%s", strings.ReplaceAll(file.RelativePath, "/", "-")),
+				Title:       "File has too many lines",
+				Description: fmt.Sprintf("File %s has %d lines, exceeding the maximum of %d lines", file.RelativePath, file.LineCount, a.config.MaxFileLines),
+				Category:    report.CategoryQuality,
+				Severity:    a.determineSeverityBySize(file.LineCount),
+				File:        file.RelativePath,
+				Rule:        "max-file-lines",
+				Fix:         "Consider breaking this file into smaller, more focused modules",
+				CreatedAt:   time.Now(),
+			}
+			issues = append(issues, issue)
+		}
+	}
+
+	return issues
 }
 
 func (a *QualityAnalyzer) checkLargeFiles() ([]report.Issue, error) {
@@ -65,6 +125,36 @@ func (a *QualityAnalyzer) checkLargeFiles() ([]report.Issue, error) {
 			}
 			issues = append(issues, issue)
 		}
+	}
+
+	return issues, nil
+}
+
+// checkComplexityFromCache checks function complexity using cached data
+func (a *QualityAnalyzer) checkComplexityFromCache(cachedFiles map[string]*scanner.UnifiedFileInfo) ([]report.Issue, error) {
+	var issues []report.Issue
+
+	for _, file := range cachedFiles {
+		// Only analyze Go files
+		if file.Extension != ".go" || !file.IsText {
+			continue
+		}
+
+		// Use cached content if available, otherwise read file
+		var content string
+		if len(file.Content) > 0 {
+			content = string(file.Content)
+		} else {
+			// For large files, read content on demand
+			fileContent, err := a.readFileContent(file.Path)
+			if err != nil {
+				continue // Skip files that can't be read
+			}
+			content = string(fileContent)
+		}
+
+		functionIssues := a.analyzeFunctionComplexity(content, file.RelativePath)
+		issues = append(issues, functionIssues...)
 	}
 
 	return issues, nil
@@ -249,4 +339,99 @@ func (a *QualityAnalyzer) determineSeverityByComplexity(complexity int) report.S
 	default: // Slightly above the threshold
 		return report.SeverityLow
 	}
+}
+
+// readFileContent reads the entire content of a file
+func (a *QualityAnalyzer) readFileContent(filePath string) ([]byte, error) {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return nil, err
+	}
+	defer func(file *os.File) {
+		err := file.Close()
+		if err != nil {
+			fmt.Printf("Error closing file %s: %v\n", filePath, err)
+		}
+	}(file)
+
+	return io.ReadAll(file)
+}
+
+// analyzeFunctionComplexity analyzes function complexity from file content
+func (a *QualityAnalyzer) analyzeFunctionComplexity(content, filePath string) []report.Issue {
+	var issues []report.Issue
+
+	// Skip test files
+	if a.isTestFile(filePath) {
+		return issues
+	}
+
+	// Find all function declarations using regex
+	funcRegex := regexp.MustCompile(`func\s+(\([^)]+\)\s+)?(\w+\s*)?\(`)
+	lines := strings.Split(content, "\n")
+
+	for lineNum, line := range lines {
+		if funcRegex.MatchString(line) {
+			// Calculate complexity for this function
+			complexity := a.calculateComplexityFromContent(content, lineNum+1)
+			if complexity > a.config.ComplexityThreshold {
+				issue := report.Issue{
+					ID:          fmt.Sprintf("high-complexity-%s-%d", strings.ReplaceAll(filePath, "/", "-"), lineNum+1),
+					Title:       "High function complexity",
+					Description: fmt.Sprintf("Complexity: %d (threshold: %d). This function has many decision points making it harder to understand and test.", complexity, a.config.ComplexityThreshold),
+					Category:    report.CategoryQuality,
+					Severity:    a.determineSeverityByComplexity(complexity),
+					File:        filePath,
+					Line:        lineNum + 1,
+					Rule:        "cyclomatic-complexity",
+					Fix:         "Break into smaller functions, reduce nested conditions, or use early returns",
+					CreatedAt:   time.Now(),
+				}
+				issues = append(issues, issue)
+			}
+		}
+	}
+
+	return issues
+}
+
+// calculateComplexityFromContent calculates cyclomatic complexity from file content
+func (a *QualityAnalyzer) calculateComplexityFromContent(content string, startLine int) int {
+	// Start with a baseline complexity of 1
+	complexity := 1
+	lines := strings.Split(content, "\n")
+
+	// Find the end of the function (next function or end of file)
+	endLine := len(lines)
+	funcRegex := regexp.MustCompile(`func\s+(\([^)]+\)\s+)?(\w+\s*)?\(`)
+	for i := startLine; i < len(lines); i++ {
+		if funcRegex.MatchString(lines[i]) {
+			endLine = i
+			break
+		}
+	}
+
+	// Count complexity patterns in the function
+	complexityPatterns := []*regexp.Regexp{
+		regexp.MustCompile(`\bif\b`),
+		regexp.MustCompile(`\bfor\b`),
+		regexp.MustCompile(`\brange\b`),
+		regexp.MustCompile(`\bswitch\b`),
+		regexp.MustCompile(`\bcase\b`),
+		regexp.MustCompile(`\bselect\b`),
+		regexp.MustCompile(`&&`),
+		regexp.MustCompile(`\|\|`),
+		regexp.MustCompile(`\bgoto\b`),
+	}
+
+	for i := startLine - 1; i < endLine && i < len(lines); i++ {
+		line := lines[i]
+		for _, pattern := range complexityPatterns {
+			if pattern.MatchString(line) {
+				complexity++
+			}
+		}
+	}
+
+	return complexity
 }

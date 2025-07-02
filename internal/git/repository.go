@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	gogit "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
@@ -19,6 +20,27 @@ type Repository struct {
 	repo     *gogit.Repository
 	workTree *gogit.Worktree
 	path     string
+	cache    *Cache
+}
+
+// GitCache provides caching for expensive Git operations
+type Cache struct {
+	mu            sync.RWMutex
+	branches      []string
+	remotes       []string
+	headRef       *plumbing.Reference
+	commitHistory []*object.Commit
+	batchedData   *BatchedGitData
+	cacheValid    bool
+}
+
+// BatchedGitData contains results from batched Git operations
+type BatchedGitData struct {
+	Branches      []string
+	Remotes       []string
+	CurrentBranch string
+	CurrentCommit string
+	Status        gogit.Status
 }
 
 func OpenRepository(path string) (*Repository, error) {
@@ -41,6 +63,7 @@ func OpenRepository(path string) (*Repository, error) {
 		repo:     repo,
 		workTree: workTree,
 		path:     absPath,
+		cache:    &Cache{},
 	}, nil
 }
 
@@ -64,6 +87,13 @@ func (r *Repository) GetPath() string {
 }
 
 func (r *Repository) GetCurrentBranch() (string, error) {
+	// Try to use batched data first
+	batchedData, err := r.BatchGitOperations()
+	if err == nil && batchedData.CurrentBranch != "" {
+		return batchedData.CurrentBranch, nil
+	}
+
+	// Fallback to direct access
 	head, err := r.repo.Head()
 	if err != nil {
 		return "", fmt.Errorf(failedToGetHeadError+" %w", err)
@@ -77,6 +107,13 @@ func (r *Repository) GetCurrentBranch() (string, error) {
 }
 
 func (r *Repository) GetCurrentCommit() (string, error) {
+	// Try to use batched data first
+	batchedData, err := r.BatchGitOperations()
+	if err == nil && batchedData.CurrentCommit != "" {
+		return batchedData.CurrentCommit, nil
+	}
+
+	// Fallback to direct access
 	head, err := r.repo.Head()
 	if err != nil {
 		return "", fmt.Errorf(failedToGetHeadError+" %w", err)
@@ -119,40 +156,35 @@ func (r *Repository) GetCommitHistory(maxCount int) ([]*object.Commit, error) {
 }
 
 func (r *Repository) GetBranches() ([]string, error) {
-	branches, err := r.repo.Branches()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get branches: %w", err)
-	}
-	defer branches.Close()
-
-	var branchNames []string
-	err = branches.ForEach(func(ref *plumbing.Reference) error {
-		branchNames = append(branchNames, ref.Name().Short())
-		return nil
-	})
-
-	if err != nil {
-		return nil, fmt.Errorf("failed to iterate branches: %w", err)
+	// Try to use batched data first
+	batchedData, err := r.BatchGitOperations()
+	if err == nil && len(batchedData.Branches) > 0 {
+		return batchedData.Branches, nil
 	}
 
-	return branchNames, nil
+	// Fallback to direct access
+	return r.getBranchesInternal()
 }
 
 func (r *Repository) GetRemotes() ([]string, error) {
-	remotes, err := r.repo.Remotes()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get remotes: %w", err)
+	// Try to use batched data first
+	batchedData, err := r.BatchGitOperations()
+	if err == nil && len(batchedData.Remotes) > 0 {
+		return batchedData.Remotes, nil
 	}
 
-	var remoteNames []string
-	for _, remote := range remotes {
-		remoteNames = append(remoteNames, remote.Config().Name)
-	}
-
-	return remoteNames, nil
+	// Fallback to direct access
+	return r.getRemotesInternal()
 }
 
 func (r *Repository) GetStatus() (gogit.Status, error) {
+	// Try to use batched data first
+	batchedData, err := r.BatchGitOperations()
+	if err == nil && batchedData.Status != nil {
+		return batchedData.Status, nil
+	}
+
+	// Fallback to direct access
 	status, err := r.workTree.Status()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get repository status: %w", err)
@@ -193,6 +225,106 @@ func (r *Repository) GetFileHistory(filePath string, maxCount int) ([]*object.Co
 	}
 
 	return commits, nil
+}
+
+// BatchGitOperations performs multiple Git operations in one call for efficiency
+func (r *Repository) BatchGitOperations() (*BatchedGitData, error) {
+	r.cache.mu.Lock()
+	defer r.cache.mu.Unlock()
+
+	// Return cached data if valid
+	if r.cache.cacheValid && r.cache.batchedData != nil {
+		return r.cache.batchedData, nil
+	}
+
+	batchedData := &BatchedGitData{}
+
+	// Get HEAD reference once
+	head, err := r.repo.Head()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get HEAD: %w", err)
+	}
+	r.cache.headRef = head
+
+	// Get current branch
+	if head.Name().IsBranch() {
+		batchedData.CurrentBranch = head.Name().Short()
+	} else {
+		batchedData.CurrentBranch = "HEAD"
+	}
+
+	// Get current commit
+	batchedData.CurrentCommit = head.Hash().String()
+
+	// Get branches
+	branches, err := r.getBranchesInternal()
+	if err == nil {
+		batchedData.Branches = branches
+		r.cache.branches = branches
+	}
+
+	// Get remotes
+	remotes, err := r.getRemotesInternal()
+	if err == nil {
+		batchedData.Remotes = remotes
+		r.cache.remotes = remotes
+	}
+
+	// Get status
+	status, err := r.workTree.Status()
+	if err == nil {
+		batchedData.Status = status
+	}
+
+	// Cache the results
+	r.cache.batchedData = batchedData
+	r.cache.cacheValid = true
+
+	return batchedData, nil
+}
+
+// getBranchesInternal is the internal implementation without caching logic
+func (r *Repository) getBranchesInternal() ([]string, error) {
+	branches, err := r.repo.Branches()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get branches: %w", err)
+	}
+	defer branches.Close()
+
+	var branchNames []string
+	err = branches.ForEach(func(ref *plumbing.Reference) error {
+		branchNames = append(branchNames, ref.Name().Short())
+		return nil
+	})
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to iterate branches: %w", err)
+	}
+
+	return branchNames, nil
+}
+
+// getRemotesInternal is the internal implementation without caching logic
+func (r *Repository) getRemotesInternal() ([]string, error) {
+	remotes, err := r.repo.Remotes()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get remotes: %w", err)
+	}
+
+	var remoteNames []string
+	for _, remote := range remotes {
+		remoteNames = append(remoteNames, remote.Config().Name)
+	}
+
+	return remoteNames, nil
+}
+
+// InvalidateCache invalidates the Git cache
+func (r *Repository) InvalidateCache() {
+	r.cache.mu.Lock()
+	defer r.cache.mu.Unlock()
+	r.cache.cacheValid = false
+	r.cache.batchedData = nil
 }
 
 func (r *Repository) GetLargeFiles(minSizeBytes int64) ([]string, error) {

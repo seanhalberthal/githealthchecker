@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/githealthchecker/git-health-checker/internal/analyzer"
@@ -83,6 +84,29 @@ type checkContext struct {
 	verbose bool
 }
 
+// Global thread-safe issue collector for parallel analysis
+var (
+	globalIssues   []report.Issue
+	globalIssuesMu sync.Mutex
+)
+
+// addIssuesThreadSafe adds issues to the global collector in a thread-safe manner
+func addIssuesThreadSafe(issues []report.Issue) {
+	globalIssuesMu.Lock()
+	defer globalIssuesMu.Unlock()
+	globalIssues = append(globalIssues, issues...)
+}
+
+// getAndClearGlobalIssues retrieves all collected issues and clears the collector
+func getAndClearGlobalIssues() []report.Issue {
+	globalIssuesMu.Lock()
+	defer globalIssuesMu.Unlock()
+	issues := make([]report.Issue, len(globalIssues))
+	copy(issues, globalIssues)
+	globalIssues = globalIssues[:0] // Clear the slice
+	return issues
+}
+
 func setupCheckContext(cmd *cobra.Command, args []string) (*checkContext, error) {
 	targetPath := "."
 	if len(args) > 0 {
@@ -154,9 +178,16 @@ func performHealthCheck(context *checkContext, startTime time.Time) (*report.Rep
 		fmt.Println("Running health checks...")
 	}
 
+	// Clear global issues before starting
+	getAndClearGlobalIssues()
+
 	if err := runAnalyses(context.repo, context.cfg, healthReport, context.verbose); err != nil {
 		return nil, fmt.Errorf("analysis failed: %w", err)
 	}
+
+	// Collect all issues from parallel analyses
+	collectedIssues := getAndClearGlobalIssues()
+	healthReport.Issues = append(healthReport.Issues, collectedIssues...)
 
 	// Analyze code statistics
 	if err := runCodeStatsAnalysis(context.repo, healthReport, context.verbose); err != nil {
@@ -224,6 +255,14 @@ type analysisRunner struct {
 	runner  func() error
 }
 
+// analysisResult holds the result of a parallel analysis
+type analysisResult struct {
+	name   string
+	issues []report.Issue
+	stats  *report.CodeStats // Only for code stats analysis
+	err    error
+}
+
 func (a *analysisRunner) execute(verbose bool) error {
 	if !a.enabled {
 		return nil
@@ -243,15 +282,30 @@ func (a *analysisRunner) execute(verbose bool) error {
 }
 
 func runAnalyses(repo *git.Repository, cfg *config.Config, healthReport *report.Report, verbose bool) error {
+	// First, initialize a unified scanner for all analyses that will use it
+	fileScanner, err := scanner.NewFileScanner(repo.GetPath())
+	if err != nil {
+		return fmt.Errorf(failedToCreateScannerError, err)
+	}
+
+	// Perform a unified scan once
+	if verbose {
+		fmt.Println("  - Scanning files...")
+	}
+	if _, err := fileScanner.ScanAllFiles(); err != nil {
+		return fmt.Errorf("failed to perform unified file scan: %w", err)
+	}
+
+	// Create analysis runners with parallel execution support
 	analyses := []analysisRunner{
 		{name: "security", enabled: enableSecurity, runner: func() error {
-			return runSecurityAnalysis(repo, cfg, healthReport)
+			return runSecurityAnalysisOptimized(cfg, fileScanner)
 		}},
 		{name: "performance", enabled: enablePerformance, runner: func() error {
 			return runPerformanceAnalysis(repo, cfg, healthReport)
 		}},
 		{name: "quality", enabled: enableQuality, runner: func() error {
-			return runQualityAnalysis(repo, cfg, healthReport)
+			return runQualityAnalysisOptimized(cfg, fileScanner)
 		}},
 		{name: "maintenance", enabled: enableMaintenance, runner: func() error {
 			return runMaintenanceAnalysis(repo, cfg, healthReport)
@@ -267,21 +321,78 @@ func runAnalyses(repo *git.Repository, cfg *config.Config, healthReport *report.
 		}},
 	}
 
-	for _, analysis := range analyses {
-		if err := analysis.execute(verbose); err != nil {
-			return err
-		}
+	return runAnalysesParallel(analyses, verbose)
+}
+
+// runAnalysesParallel executes independent analyses in parallel
+func runAnalysesParallel(analyses []analysisRunner, verbose bool) error {
+	enabledAnalyses := filterEnabledAnalyses(analyses)
+	if len(enabledAnalyses) == 0 {
+		return nil
 	}
 
+	return executeAnalysesInParallel(enabledAnalyses, verbose)
+}
+
+// filterEnabledAnalyses returns only enabled analyses
+func filterEnabledAnalyses(analyses []analysisRunner) []analysisRunner {
+	var enabled []analysisRunner
+	for _, analysis := range analyses {
+		if analysis.enabled {
+			enabled = append(enabled, analysis)
+		}
+	}
+	return enabled
+}
+
+// executeAnalysesInParallel runs analyses concurrently and collects results
+func executeAnalysesInParallel(analyses []analysisRunner, verbose bool) error {
+	resultCh := make(chan analysisResult, len(analyses))
+	var wg sync.WaitGroup
+
+	// Start all analyses
+	for _, analysis := range analyses {
+		wg.Add(1)
+		go runSingleAnalysis(analysis, verbose, &wg, resultCh)
+	}
+
+	// Wait and close channel
+	go func() {
+		wg.Wait()
+		close(resultCh)
+	}()
+
+	// Collect and check results
+	return collectAnalysisResults(resultCh)
+}
+
+// runSingleAnalysis executes a single analysis in a goroutine
+func runSingleAnalysis(analysis analysisRunner, verbose bool, wg *sync.WaitGroup, resultCh chan analysisResult) {
+	defer wg.Done()
+
+	if verbose {
+		fmt.Printf("  - Running %s analysis...\n", analysis.name)
+	}
+
+	err := analysis.runner()
+	resultCh <- analysisResult{
+		name: analysis.name,
+		err:  err,
+	}
+}
+
+// collectAnalysisResults processes analysis results and returns any errors
+func collectAnalysisResults(resultCh chan analysisResult) error {
+	for result := range resultCh {
+		if result.err != nil {
+			return fmt.Errorf("%s analysis failed: %w", result.name, result.err)
+		}
+	}
 	return nil
 }
 
-func runSecurityAnalysis(repo *git.Repository, cfg *config.Config, healthReport *report.Report) error {
-	fileScanner, err := scanner.NewFileScanner(repo.GetPath())
-	if err != nil {
-		return fmt.Errorf(failedToCreateScannerError, err)
-	}
-
+// Optimized security analysis using pre-scanned files
+func runSecurityAnalysisOptimized(cfg *config.Config, fileScanner *scanner.FileScanner) error {
 	securityAnalyzer := analyzer.NewSecurityAnalyzer(&cfg.Security, fileScanner)
 
 	issues, err := securityAnalyzer.Analyze()
@@ -289,7 +400,8 @@ func runSecurityAnalysis(repo *git.Repository, cfg *config.Config, healthReport 
 		return fmt.Errorf("security analysis failed: %w", err)
 	}
 
-	healthReport.Issues = append(healthReport.Issues, issues...)
+	// Store results in global result collector (thread-safe)
+	addIssuesThreadSafe(issues)
 	return nil
 }
 
@@ -321,12 +433,8 @@ func runPerformanceAnalysis(repo *git.Repository, cfg *config.Config, healthRepo
 	return nil
 }
 
-func runQualityAnalysis(repo *git.Repository, cfg *config.Config, healthReport *report.Report) error {
-	fileScanner, err := scanner.NewFileScanner(repo.GetPath())
-	if err != nil {
-		return fmt.Errorf(failedToCreateScannerError, err)
-	}
-
+// Optimized quality analysis using pre-scanned files
+func runQualityAnalysisOptimized(cfg *config.Config, fileScanner *scanner.FileScanner) error {
 	qualityAnalyzer := analyzer.NewQualityAnalyzer(&cfg.Quality, fileScanner)
 
 	issues, err := qualityAnalyzer.Analyze()
@@ -334,7 +442,8 @@ func runQualityAnalysis(repo *git.Repository, cfg *config.Config, healthReport *
 		return fmt.Errorf("quality analysis failed: %w", err)
 	}
 
-	healthReport.Issues = append(healthReport.Issues, issues...)
+	// Store results in global result collector (thread-safe)
+	addIssuesThreadSafe(issues)
 	return nil
 }
 
