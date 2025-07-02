@@ -1,0 +1,408 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+permissions:
+  contents: write
+  pull-requests: read
+
+env:
+  GO_VERSION: '1.21'
+
+jobs:
+  # Single job for test, lint, and quality checks on Ubuntu
+  test-and-lint:
+    name: Test & Lint
+    runs-on: ubuntu-latest
+    outputs:
+      health-score: ${{ steps.health-check.outputs.health-score }}
+      
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: ${{ env.GO_VERSION }}
+        
+    - name: Cache Go modules
+      uses: actions/cache@v4
+      continue-on-error: true
+      with:
+        path: |
+          ~/.cache/go-build
+          ~/go/pkg/mod
+        key: ${{ runner.os }}-go-${{ env.GO_VERSION }}-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-${{ env.GO_VERSION }}-
+          ${{ runner.os }}-go-
+          
+    - name: Download and verify dependencies
+      run: |
+        go mod download
+        go mod verify
+        
+    - name: Run linting
+      run: |
+        # Check formatting
+        if [ "$(gofmt -s -l . | wc -l)" -gt 0 ]; then
+          echo "The following files are not formatted:"
+          gofmt -s -l .
+          exit 1
+        fi
+        # Run static analysis
+        go vet ./...
+        
+    - name: Run tests with coverage
+      run: go test -v -race -coverprofile=coverage.out ./...
+      
+    - name: Build application
+      run: go build -v -o githealthchecker .
+      
+    - name: Self health check
+      id: health-check
+      run: |
+        # Move binary to avoid it being flagged as a large file in the health check
+        mv githealthchecker /tmp/githealthchecker
+        /tmp/githealthchecker check --verbose --format=json --output=health-report.json .
+        
+        # Test individual analyzers
+        echo "Testing individual analyzer components..."
+        /tmp/githealthchecker check --security . --format=json --output=security-report.json
+        /tmp/githealthchecker check --quality . --format=json --output=quality-report.json  
+        /tmp/githealthchecker check --performance . --format=json --output=performance-report.json
+        /tmp/githealthchecker check --maintenance . --format=json --output=maintenance-report.json
+        /tmp/githealthchecker check --workflow . --format=json --output=workflow-report.json
+        echo "All analyzer components working correctly!"
+        
+        # Extract health score for other jobs
+        HEALTH_SCORE=$(jq -r '.summary.score // 0' health-report.json)
+        echo "health-score=$HEALTH_SCORE" >> $GITHUB_OUTPUT
+        
+        # Check for critical issues and overall health score
+        CRITICAL_COUNT=$(jq '.summary.issues_by_severity.critical // 0' health-report.json)
+        HIGH_COUNT=$(jq '.summary.issues_by_severity.high // 0' health-report.json)
+        
+        echo "Health Score: $HEALTH_SCORE/100"
+        echo "Critical issues: $CRITICAL_COUNT"
+        echo "High severity issues: $HIGH_COUNT"
+        
+        if [ "$CRITICAL_COUNT" -gt 0 ]; then
+          echo "❌ Critical security issues found!"
+          exit 1
+        fi
+        
+        if [ "$HIGH_COUNT" -gt 5 ]; then
+          echo "⚠️  Too many high severity issues found!"
+          exit 1
+        fi
+        
+        if [ "$HEALTH_SCORE" -lt 100 ]; then
+          echo "❌ Health score is $HEALTH_SCORE/100 - repository health check failed!"
+          echo "Run 'githealthchecker check .' locally to see issues"
+          echo "Run 'githealthchecker fix .' to auto-fix dependency issues"
+          exit 1
+        fi
+        
+        echo "✅ Health check passed!"
+        
+    - name: Generate coverage report
+      run: go tool cover -html=coverage.out -o coverage.html
+      
+    - name: Display health report summary
+      run: |
+        echo "## Health Check Results" >> $GITHUB_STEP_SUMMARY
+        echo "**Health Score: ${{ steps.health-check.outputs.health-score }}/100**" >> $GITHUB_STEP_SUMMARY
+        echo '```json' >> $GITHUB_STEP_SUMMARY
+        jq '.summary' health-report.json >> $GITHUB_STEP_SUMMARY
+        echo '```' >> $GITHUB_STEP_SUMMARY
+        
+    - name: Upload coverage reports to Codecov
+      uses: codecov/codecov-action@v4
+      with:
+        file: ./coverage.out
+        flags: unittests
+        name: codecov-umbrella
+        
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: reports-and-coverage
+        path: |
+          coverage.html
+          health-report.json
+          *-report.json
+
+  # Multi-platform build job (only runs after tests pass)
+  build-cross-platform:
+    name: Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    needs: test-and-lint
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: ${{ env.GO_VERSION }}
+        
+    - name: Cache Go modules
+      uses: actions/cache@v4
+      continue-on-error: true
+      with:
+        path: |
+          ~/.cache/go-build
+          ~/go/pkg/mod
+        key: ${{ runner.os }}-go-${{ env.GO_VERSION }}-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-${{ env.GO_VERSION }}-
+          ${{ runner.os }}-go-
+          
+    - name: Build and test binary
+      run: |
+        go mod download
+        # Build with version information  
+        VERSION_TAG="dev-$(git rev-parse --short HEAD)"
+        go build -v -ldflags "-X github.com/seanhalberthal/githealthchecker/cmd.Version=$VERSION_TAG" -o githealthchecker${{ matrix.os == 'windows-latest' && '.exe' || '' }} .
+      shell: bash
+        
+    - name: Test binary
+      run: |
+        if [ "${{ matrix.os }}" = "windows-latest" ]; then
+          ./githealthchecker.exe --help
+        else
+          ./githealthchecker --help
+        fi
+      shell: bash
+      
+    - name: Upload build artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: githealthchecker-${{ matrix.os }}
+        path: githealthchecker${{ matrix.os == 'windows-latest' && '.exe' || '' }}
+
+  release-check:
+    name: Release Readiness
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    needs: [test-and-lint, build-cross-platform]
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # Need full history for conventional commits
+        
+    - name: Determine next version
+      id: version
+      run: |
+        # Get the latest release tag
+        LATEST_TAG=$(git tag -l "v*" | sort -V | tail -1)
+        
+        if [ -z "$LATEST_TAG" ]; then
+          # No previous releases, start with v1.0.0
+          LATEST_TAG="v0.0.0"
+          echo "No previous release found, starting from v1.0.0"
+        fi
+        
+        echo "Latest tag: $LATEST_TAG"
+        
+        # Get commits since last release
+        if [ "$LATEST_TAG" = "v0.0.0" ]; then
+          COMMITS=$(git log --oneline --pretty=format:"%s")
+        else
+          COMMITS=$(git log ${LATEST_TAG}..HEAD --oneline --pretty=format:"%s")
+        fi
+        
+        echo "Analyzing commits since $LATEST_TAG:"
+        echo "$COMMITS"
+        
+        # Parse current version
+        CURRENT_VERSION=${LATEST_TAG#v}
+        if [ "$CURRENT_VERSION" = "0.0.0" ]; then
+          MAJOR=1
+          MINOR=0
+          PATCH=0
+        else
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT_VERSION"
+        fi
+        
+        # Determine version bump based on conventional commits
+        HAS_BREAKING=false
+        HAS_FEAT=false
+        HAS_FIX=false
+        
+        while IFS= read -r commit; do
+          if echo "$commit" | grep -q "BREAKING CHANGE\|!:"; then
+            HAS_BREAKING=true
+          elif echo "$commit" | grep -qE "^feat(\(.+\))?:"; then
+            HAS_FEAT=true
+          elif echo "$commit" | grep -qE "^fix(\(.+\))?:"; then
+            HAS_FIX=true
+          fi
+        done <<< "$COMMITS"
+        
+        # Calculate new version
+        if [ "$HAS_BREAKING" = true ]; then
+          MAJOR=$((MAJOR + 1))
+          MINOR=0
+          PATCH=0
+          BUMP_TYPE="major"
+        elif [ "$HAS_FEAT" = true ]; then
+          MINOR=$((MINOR + 1))
+          PATCH=0
+          BUMP_TYPE="minor"
+        elif [ "$HAS_FIX" = true ]; then
+          PATCH=$((PATCH + 1))
+          BUMP_TYPE="patch"
+        else
+          echo "No significant changes found (no feat/fix/breaking changes)"
+          echo "should_release=false" >> $GITHUB_OUTPUT
+          exit 0
+        fi
+        
+        NEW_VERSION="$MAJOR.$MINOR.$PATCH"
+        echo "Version bump: $BUMP_TYPE ($CURRENT_VERSION → $NEW_VERSION)"
+        
+        echo "should_release=true" >> $GITHUB_OUTPUT
+        echo "version=$NEW_VERSION" >> $GITHUB_OUTPUT
+        echo "bump_type=$BUMP_TYPE" >> $GITHUB_OUTPUT
+        echo "previous_version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
+        
+    - name: Generate release notes
+      if: steps.version.outputs.should_release == 'true'
+      id: release_notes
+      run: |
+        LATEST_TAG="v${{ steps.version.outputs.previous_version }}"
+        NEW_VERSION="${{ steps.version.outputs.version }}"
+        
+        # Get commits for release notes
+        if [ "$LATEST_TAG" = "v0.0.0" ]; then
+          COMMITS=$(git log --oneline --pretty=format:"- %s (%h)")
+        else
+          COMMITS=$(git log ${LATEST_TAG}..HEAD --oneline --pretty=format:"- %s (%h)")
+        fi
+        
+        # Categorize commits
+        FEATURES=""
+        FIXES=""
+        BREAKING_CHANGES=""
+        OTHER=""
+        
+        while IFS= read -r commit; do
+          if echo "$commit" | grep -q "BREAKING CHANGE\|!:"; then
+            BREAKING_CHANGES="$BREAKING_CHANGES$commit"$'\n'
+          elif echo "$commit" | grep -qE "^- feat(\(.+\))?:"; then
+            FEATURES="$FEATURES$commit"$'\n'
+          elif echo "$commit" | grep -qE "^- fix(\(.+\))?:"; then
+            FIXES="$FIXES$commit"$'\n'
+          else
+            OTHER="$OTHER$commit"$'\n'
+          fi
+        done <<< "$COMMITS"
+        
+        # Build release notes
+        RELEASE_NOTES="## Git Repository Health Checker v$NEW_VERSION"$'\n\n'
+        
+        if [ -n "$BREAKING_CHANGES" ]; then
+          RELEASE_NOTES="$RELEASE_NOTES### 🚨 Breaking Changes"$'\n'"$BREAKING_CHANGES"$'\n'
+        fi
+        
+        if [ -n "$FEATURES" ]; then
+          RELEASE_NOTES="$RELEASE_NOTES### ✨ New Features"$'\n'"$FEATURES"$'\n'
+        fi
+        
+        if [ -n "$FIXES" ]; then
+          RELEASE_NOTES="$RELEASE_NOTES### 🐛 Bug Fixes"$'\n'"$FIXES"$'\n'
+        fi
+        
+        if [ -n "$OTHER" ]; then
+          RELEASE_NOTES="$RELEASE_NOTES### 📝 Other Changes"$'\n'"$OTHER"$'\n'
+        fi
+        
+        RELEASE_NOTES="$RELEASE_NOTES### 🚀 Installation"$'\n'
+        RELEASE_NOTES="$RELEASE_NOTES"$'Download the appropriate binary for your platform from the assets below.\n\n'
+        RELEASE_NOTES="$RELEASE_NOTES### 📖 Usage"$'\n'
+        RELEASE_NOTES="$RELEASE_NOTES"$'```bash\ngit-health-checker check /path/to/repo\n```\n\n'
+        RELEASE_NOTES="$RELEASE_NOTES"$'See the [documentation](./CLAUDE.md) for more details.'
+        
+        # Save to file to handle multiline output
+        echo "$RELEASE_NOTES" > release_notes.md
+        echo "Generated release notes for v$NEW_VERSION"
+        
+    - name: Download build artifacts
+      if: steps.version.outputs.should_release == 'true'
+      uses: actions/download-artifact@v4
+      with:
+        pattern: githealthchecker-*
+        path: ./artifacts
+        
+    - name: Prepare release assets
+      if: steps.version.outputs.should_release == 'true'
+      run: |
+        # Create release assets directory
+        mkdir -p release-assets
+        
+        echo "Downloaded artifacts structure:"
+        find ./artifacts -type f -name "*githealthchecker*" | head -20
+        
+        # Process Linux binary
+        if [ -f "./artifacts/githealthchecker-ubuntu-latest/githealthchecker" ]; then
+          cp "./artifacts/githealthchecker-ubuntu-latest/githealthchecker" ./githealthchecker
+          tar -czf release-assets/githealthchecker-v${{ steps.version.outputs.version }}-linux-amd64.tar.gz githealthchecker
+          cp githealthchecker release-assets/githealthchecker-linux-amd64
+          echo "✅ Processed Linux binary"
+        fi
+        
+        # Process Windows binary
+        if [ -f "./artifacts/githealthchecker-windows-latest/githealthchecker.exe" ]; then
+          cp "./artifacts/githealthchecker-windows-latest/githealthchecker.exe" ./githealthchecker.exe
+          zip -j release-assets/githealthchecker-v${{ steps.version.outputs.version }}-windows-amd64.zip githealthchecker.exe
+          cp githealthchecker.exe release-assets/githealthchecker-windows-amd64.exe
+          echo "✅ Processed Windows binary"
+        fi
+        
+        # Process macOS binary
+        if [ -f "./artifacts/githealthchecker-macos-latest/githealthchecker" ]; then
+          cp "./artifacts/githealthchecker-macos-latest/githealthchecker" ./githealthchecker
+          tar -czf release-assets/githealthchecker-v${{ steps.version.outputs.version }}-darwin-amd64.tar.gz githealthchecker
+          cp githealthchecker release-assets/githealthchecker-darwin-amd64
+          echo "✅ Processed macOS binary"
+        else
+          echo "❌ macOS binary not found"
+        fi
+        
+        # List all release assets
+        echo "Release assets prepared:"
+        ls -la release-assets/
+        
+    - name: Create release with assets
+      if: steps.version.outputs.should_release == 'true'
+      uses: softprops/action-gh-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: v${{ steps.version.outputs.version }}
+        name: Release v${{ steps.version.outputs.version }}
+        body_path: release_notes.md
+        draft: false
+        prerelease: false
+        files: |
+          release-assets/*
+        
+    - name: Release summary
+      if: steps.version.outputs.should_release == 'true'
+      run: |
+        echo "🎉 Created release v${{ steps.version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+        echo "📈 Version bump: ${{ steps.version.outputs.bump_type }}" >> $GITHUB_STEP_SUMMARY
+        echo "🏷️ Previous version: v${{ steps.version.outputs.previous_version }}" >> $GITHUB_STEP_SUMMARY

@@ -1,0 +1,125 @@
+name: Update Homebrew Formula
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to update (e.g., 1.0.6)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  update-homebrew-tap:
+    name: Update Homebrew Tap
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Get release information
+      id: release
+      run: |
+        # Extract version from tag (remove 'v' prefix) or use manual input
+        if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          VERSION="${{ github.event.inputs.version }}"
+        else
+          VERSION=${GITHUB_REF#refs/tags/v}
+        fi
+        echo "version=$VERSION" >> $GITHUB_OUTPUT
+        
+        # Get download URLs for the release assets
+        DARWIN_URL="https://github.com/${{ github.repository }}/releases/download/v${VERSION}/githealthchecker-v${VERSION}-darwin-amd64.tar.gz"
+        LINUX_URL="https://github.com/${{ github.repository }}/releases/download/v${VERSION}/githealthchecker-v${VERSION}-linux-amd64.tar.gz"
+        
+        echo "darwin_url=$DARWIN_URL" >> $GITHUB_OUTPUT
+        echo "linux_url=$LINUX_URL" >> $GITHUB_OUTPUT
+        
+    - name: Download and calculate checksums
+      id: checksums
+      run: |
+        # Wait a moment for release assets to be available
+        sleep 30
+        
+        # Download the release assets to calculate SHA256
+        curl -L -o darwin-binary.tar.gz "${{ steps.release.outputs.darwin_url }}"
+        curl -L -o linux-binary.tar.gz "${{ steps.release.outputs.linux_url }}"
+        
+        # Calculate SHA256 checksums
+        DARWIN_SHA256=$(shasum -a 256 darwin-binary.tar.gz | cut -d' ' -f1)
+        LINUX_SHA256=$(shasum -a 256 linux-binary.tar.gz | cut -d' ' -f1)
+        
+        echo "darwin_sha256=$DARWIN_SHA256" >> $GITHUB_OUTPUT
+        echo "linux_sha256=$LINUX_SHA256" >> $GITHUB_OUTPUT
+        
+        echo "Darwin SHA256: $DARWIN_SHA256"
+        echo "Linux SHA256: $LINUX_SHA256"
+        
+    - name: Checkout homebrew tap repository
+      uses: actions/checkout@v4
+      with:
+        repository: seanhalberthal/homebrew-githealthchecker
+        token: ${{ secrets.HOMEBREW_TAP_TOKEN || secrets.GITHUB_TOKEN }}
+        path: homebrew-tap
+        
+    - name: Update Homebrew formula in tap
+      run: |
+        cd homebrew-tap
+        
+        # Create Formula directory if it doesn't exist
+        mkdir -p Formula
+        
+        # Update the Homebrew formula with new version and checksums
+        cat > Formula/githealthchecker.rb << EOF
+        class Githealthchecker < Formula
+          desc "Comprehensive CLI tool to analyze Git repositories for security, performance, and quality issues"
+          homepage "https://github.com/${{ github.repository }}"
+          url "${{ steps.release.outputs.darwin_url }}"
+          version "${{ steps.release.outputs.version }}"
+          sha256 "${{ steps.checksums.outputs.darwin_sha256 }}"
+          license "MIT"
+
+          on_linux do
+            url "${{ steps.release.outputs.linux_url }}"
+            sha256 "${{ steps.checksums.outputs.linux_sha256 }}"
+          end
+
+          def install
+            bin.install "githealthchecker"
+          end
+
+          test do
+            system "#{bin}/githealthchecker", "--help"
+            output = shell_output("#{bin}/githealthchecker version")
+            assert_match version.to_s, output
+          end
+        end
+        EOF
+        
+    - name: Commit and push to homebrew tap
+      run: |
+        cd homebrew-tap
+        
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
+        
+        # Remove old formula if it exists
+        if [ -f "Formula/git-health-checker.rb" ]; then
+          git rm "Formula/git-health-checker.rb"
+          echo "Removed old formula: git-health-checker.rb"
+        fi
+        
+        git add Formula/githealthchecker.rb
+        
+        if ! git diff --cached --exit-code; then
+          git commit -m "feat: update githealthchecker to v${{ steps.release.outputs.version }}
+          
+          Auto-generated from release v${{ steps.release.outputs.version }}
+          Source: ${{ github.repository }}"
+          git push
+          echo "✅ Updated Homebrew formula to v${{ steps.release.outputs.version }}"
+        else
+          echo "ℹ️ No changes to commit"
+        fi
