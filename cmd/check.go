@@ -67,6 +67,7 @@ func runCheck(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	suggestFixCommand(healthReport)
 	handleFailOnIssues(healthReport)
 	return nil
 }
@@ -515,4 +516,19 @@ func writeOutputToFile(content, path string) error {
 	}
 
 	return os.WriteFile(path, []byte(content), 0644)
+}
+
+func suggestFixCommand(healthReport *report.Report) {
+	hasDependencyIssues := false
+
+	for _, issue := range healthReport.Issues {
+		if issue.Category == report.CategoryDependencies {
+			hasDependencyIssues = true
+			break
+		}
+	}
+
+	if hasDependencyIssues {
+		fmt.Println("\n💡 Found dependency issues? Run 'githealthchecker fix .' to automatically resolve them.")
+	}
 }

@@ -134,8 +134,15 @@ func (a *SecurityAnalyzer) isAllowedSecret(content string) bool {
 func (a *SecurityAnalyzer) determineSecretSeverity(content string) report.Severity {
 	content = strings.ToLower(content)
 
-	highRiskPatterns := []string{"private_key", "private key", "secret_key", "secret key", "password", "token"}
-	mediumRiskPatterns := []string{"api_key", "api key", "access_key", "access key"}
+	// Only check for actual assignment patterns, not just words
+	highRiskPatterns := []string{
+		"private_key", "private key", "secret_key", "secret key",
+		"password[:=]", "password =", "password:", "token[:=]", "token =", "token:",
+	}
+	mediumRiskPatterns := []string{
+		"api_key", "api key", "access_key", "access key",
+		"apikey[:=]", "apikey =", "apikey:",
+	}
 
 	for _, pattern := range highRiskPatterns {
 		if strings.Contains(content, pattern) {

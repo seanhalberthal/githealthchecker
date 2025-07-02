@@ -106,7 +106,7 @@ func DefaultConfig() *Config {
 				"*.pem", "*.key", "*.p12", "*.pfx", "*.jks",
 				".env", ".env.*", "*.env",
 				"id_rsa", "id_dsa", "id_ecdsa", "id_ed25519",
-				"*.sql", "*.dump", "*.backup",
+				"*.dump", "*.backup", "database.sql", "db_dump.sql",
 			},
 			AllowedSecrets: []string{},
 		},
