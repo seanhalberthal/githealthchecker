@@ -10,7 +10,7 @@ import (
 var Version = "dev"
 
 var rootCmd = &cobra.Command{
-	Use:   "git-health-checker",
+	Use:   "githealthchecker",
 	Short: "A comprehensive CLI tool for analyzing Git repository health",
 	Long: `Git Health Checker is a comprehensive CLI tool that analyzes Git repositories 
 for common issues, security vulnerabilities, and maintenance problems.
@@ -18,7 +18,13 @@ for common issues, security vulnerabilities, and maintenance problems.
 It provides detailed health reports covering security, performance, 
 code quality, and maintenance aspects.`,
 	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Println("Git Health Checker - Use 'git-health-checker help' for available commands")
+		// Check for --version flag
+		version, _ := cmd.Flags().GetBool("version")
+		if version {
+			fmt.Printf("githealthchecker version %s\n", Version)
+			return
+		}
+		fmt.Println("Git Health Checker - Use 'githealthchecker help' for available commands")
 	},
 }
 
@@ -31,13 +37,14 @@ func init() {
 	rootCmd.PersistentFlags().StringP("format", "f", "table", "output format (table, json, markdown)")
 	rootCmd.PersistentFlags().StringP("output", "o", "", "output file path")
 	rootCmd.PersistentFlags().BoolP("verbose", "v", false, "verbose output")
+	rootCmd.PersistentFlags().BoolP("version", "", false, "show version information")
 
 	// Add version command
 	rootCmd.AddCommand(&cobra.Command{
 		Use:   "version",
 		Short: "Print the version number",
 		Run: func(cmd *cobra.Command, args []string) {
-			fmt.Printf("git-health-checker version %s\n", Version)
+			fmt.Printf("githealthchecker version %s\n", Version)
 		},
 	})
 }
