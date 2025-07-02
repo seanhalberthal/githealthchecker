@@ -114,7 +114,7 @@ func DefaultConfig() *Config {
 				"id_rsa", "id_dsa", "id_ecdsa", "id_ed25519",
 				"*.dump", "*.backup", "database.sql", "db_dump.sql",
 			},
-			AllowedSecrets: []string{},
+			AllowedSecrets: []string{"password", "Password", "PASSWORD", "123456", "admin", "root", "test", "demo", "example"},
 		},
 		Performance: PerformanceConfig{
 			MaxRepositorySizeMB: 1000,

@@ -518,6 +518,11 @@ func (a *DependencyAnalyzer) extractImportPath(line string) string {
 		return ""
 	}
 
+	// Remove inline comments first
+	if commentIndex := strings.Index(line, "//"); commentIndex != -1 {
+		line = strings.TrimSpace(line[:commentIndex])
+	}
+
 	// Remove alias if present (e.g., "alias 'path'" or "_ 'path'")
 	parts := strings.Fields(line)
 	var importPath string
