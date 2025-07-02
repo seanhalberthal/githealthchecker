@@ -43,6 +43,7 @@ git-health-checker check
 # Specific analysis types
 git-health-checker check --security
 git-health-checker check --quality
+git-health-checker check --go-warnings
 
 # Different output formats
 git-health-checker check --format json
@@ -67,6 +68,7 @@ git-health-checker fix
 - **Dependencies**: Outdated modules, unused dependencies, blocked packages (go.mod)
 - **Maintenance**: Missing required files (go.mod, .gitignore, README)
 - **Workflow**: Commit conventions, stale branches
+- **Go Warnings**: Compiler warnings from `go vet` and `go build`
 
 ## Configuration
 
@@ -93,6 +95,12 @@ maintenance:
   required_files:
     - "README.md"
     - ".gitignore"
+
+go_warnings:
+  enabled: true
+  ignore_patterns:
+    - "vendor/"
+    - "_test.go"
 ```
 
 ## Examples

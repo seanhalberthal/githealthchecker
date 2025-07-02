@@ -16,6 +16,7 @@ type Config struct {
 	Maintenance  MaintenanceConfig `mapstructure:"maintenance" yaml:"maintenance"`
 	Workflow     WorkflowConfig    `mapstructure:"workflow" yaml:"workflow"`
 	Dependencies DependencyConfig  `mapstructure:"dependencies" yaml:"dependencies"`
+	GoWarnings   GoWarningsConfig  `mapstructure:"go_warnings" yaml:"go_warnings"`
 }
 
 type SecurityConfig struct {
@@ -57,6 +58,11 @@ type DependencyConfig struct {
 	MaxDaysOutdated      int      `mapstructure:"max_days_outdated" yaml:"max_days_outdated"`
 	AllowedPackages      []string `mapstructure:"allowed_packages" yaml:"allowed_packages"`
 	BlockedPackages      []string `mapstructure:"blocked_packages" yaml:"blocked_packages"`
+}
+
+type GoWarningsConfig struct {
+	Enabled        bool     `mapstructure:"enabled" yaml:"enabled"`
+	IgnorePatterns []string `mapstructure:"ignore_patterns" yaml:"ignore_patterns"`
 }
 
 func Load(configPath string) (*Config, error) {
@@ -147,6 +153,13 @@ func DefaultConfig() *Config {
 			MaxDaysOutdated:      90, // 3 months - more reasonable threshold
 			AllowedPackages:      []string{},
 			BlockedPackages:      []string{},
+		},
+		GoWarnings: GoWarningsConfig{
+			Enabled: true,
+			IgnorePatterns: []string{
+				"vendor/",
+				"_test.go",
+			},
 		},
 	}
 }

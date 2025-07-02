@@ -33,6 +33,7 @@ var (
 	enableMaintenance  bool
 	enableWorkflow     bool
 	enableDependencies bool
+	enableGoWarnings   bool
 	failOnIssues       bool
 	severityThreshold  string
 )
@@ -46,6 +47,7 @@ func init() {
 	checkCmd.Flags().BoolVar(&enableMaintenance, "maintenance", false, "enable maintenance analysis")
 	checkCmd.Flags().BoolVar(&enableWorkflow, "workflow", false, "enable workflow analysis")
 	checkCmd.Flags().BoolVar(&enableDependencies, "dependencies", false, "enable dependency analysis")
+	checkCmd.Flags().BoolVar(&enableGoWarnings, "go-warnings", false, "enable Go compiler warnings analysis")
 	checkCmd.Flags().BoolVar(&failOnIssues, "fail-on-issues", false, "exit with non-zero code if issues found")
 	checkCmd.Flags().StringVar(&severityThreshold, "severity", "low", "minimum severity level (low, medium, high, critical)")
 }
@@ -175,6 +177,7 @@ func enableAllAnalysisIfNoneSelected() {
 		enableMaintenance = true
 		enableWorkflow = true
 		enableDependencies = true
+		enableGoWarnings = true
 	}
 }
 
@@ -212,7 +215,7 @@ func handleFailOnIssues(healthReport *report.Report) {
 }
 
 func anyAnalysisEnabled() bool {
-	return enableSecurity || enablePerformance || enableQuality || enableMaintenance || enableWorkflow || enableDependencies
+	return enableSecurity || enablePerformance || enableQuality || enableMaintenance || enableWorkflow || enableDependencies || enableGoWarnings
 }
 
 type analysisRunner struct {
@@ -258,6 +261,9 @@ func runAnalyses(repo *git.Repository, cfg *config.Config, healthReport *report.
 		}},
 		{name: "dependencies", enabled: enableDependencies, runner: func() error {
 			return runDependencyAnalysis(repo, cfg, healthReport)
+		}},
+		{name: "go-warnings", enabled: enableGoWarnings, runner: func() error {
+			return runGoWarningsAnalysis(repo, cfg, healthReport)
 		}},
 	}
 
@@ -354,6 +360,44 @@ func runDependencyAnalysis(repo *git.Repository, cfg *config.Config, healthRepor
 
 	healthReport.Issues = append(healthReport.Issues, issues...)
 	return nil
+}
+
+func runGoWarningsAnalysis(repo *git.Repository, cfg *config.Config, healthReport *report.Report) error {
+	if !cfg.GoWarnings.Enabled {
+		return nil
+	}
+
+	goWarningsAnalyzer := analyzer.NewGoWarningsAnalyzer(repo.GetPath())
+	issues, err := goWarningsAnalyzer.Analyze()
+	if err != nil {
+		return fmt.Errorf("go warnings analysis failed: %w", err)
+	}
+
+	// Filter issues based on ignore patterns
+	filteredIssues := filterGoWarningsByPatterns(issues, cfg.GoWarnings.IgnorePatterns)
+	healthReport.Issues = append(healthReport.Issues, filteredIssues...)
+	return nil
+}
+
+func filterGoWarningsByPatterns(issues []report.Issue, ignorePatterns []string) []report.Issue {
+	if len(ignorePatterns) == 0 {
+		return issues
+	}
+
+	var filtered []report.Issue
+	for _, issue := range issues {
+		shouldIgnore := false
+		for _, pattern := range ignorePatterns {
+			if strings.Contains(issue.File, pattern) {
+				shouldIgnore = true
+				break
+			}
+		}
+		if !shouldIgnore {
+			filtered = append(filtered, issue)
+		}
+	}
+	return filtered
 }
 
 func runCodeStatsAnalysis(repo *git.Repository, healthReport *report.Report, verbose bool) error {
