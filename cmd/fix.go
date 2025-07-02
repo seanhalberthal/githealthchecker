@@ -49,12 +49,12 @@ func runFix(cmd *cobra.Command, args []string) error {
 
 	printFixHeader(fixContext.absPath, dryRun)
 
-	totalFixed, err := performFixes(fixContext)
+	totalFixed, didFix, err := performFixes(fixContext)
 	if err != nil {
 		return err
 	}
 
-	err = printFixSummary(totalFixed, dryRun, fixContext.absPath)
+	err = printFixSummary(totalFixed, didFix, dryRun, fixContext.absPath)
 	return err
 }
 
@@ -105,33 +105,41 @@ func printFixHeader(absPath string, isDryRun bool) {
 	fmt.Println()
 }
 
-func performFixes(ctx *fixContext) (int, error) {
+func performFixes(ctx *fixContext) (int, bool, error) {
 	var totalFixed int
 
 	// Fix unused dependencies
 	fixed, err := fixUnusedDependencies(ctx.repo, ctx.cfg, dryRun)
 	if err != nil {
-		return 0, fmt.Errorf("failed to fix unused dependencies: %w", err)
+		return 0, false, fmt.Errorf("failed to fix unused dependencies: %w", err)
 	}
 	totalFixed += fixed
 
 	// Fix outdated dependencies
 	fixed, err = fixOutdatedDependencies(ctx.repo, ctx.cfg, dryRun)
 	if err != nil {
-		return 0, fmt.Errorf("failed to fix outdated dependencies: %w", err)
+		return 0, false, fmt.Errorf("failed to fix outdated dependencies: %w", err)
 	}
 	totalFixed += fixed
 
-	return totalFixed, nil
+	var runGoModTidy bool
+	if totalFixed == 0 {
+		runGoModTidy = true
+	}
+
+	return totalFixed, runGoModTidy, nil
 }
 
-func printFixSummary(totalFixed int, isDryRun bool, repoPath string) error {
+func printFixSummary(totalFixed int, didFix, isDryRun bool, repoPath string) error {
 	fmt.Println()
 	if isDryRun {
 		fmt.Printf("✨ Would fix %d dependency issues\n", totalFixed)
 		fmt.Println("Run without --dry-run to apply the fixes")
 		if totalFixed > 0 {
 			fmt.Println("💡 Will run 'go mod tidy' after applying fixes")
+		}
+		if !didFix {
+			fmt.Println("✅ No dependency issues found to fix")
 		}
 	} else {
 		fmt.Printf("✅ Fixed %d dependency issues successfully!\n", totalFixed)
